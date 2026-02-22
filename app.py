@@ -1,0 +1,235 @@
+import streamlit as st
+import pandas as pd
+import plotly.express as px
+from io import BytesIO
+
+# --- 页面基础设置 ---
+st.set_page_config(page_title="亚马逊财务中台-V9.9", page_icon="📈", layout="wide")
+st.title("📈 亚马逊全链路利润与审计系统 (V9.9 极简公用版)")
+
+# --- 侧边栏：设置与上传 ---
+st.sidebar.header("数据源上传")
+report_file = st.sidebar.file_uploader("上传 Settlement 结算表 (CSV/TXT)", type=['csv', 'txt'])
+cost_file = st.sidebar.file_uploader("上传 SKU 成本表 (Excel/CSV)", type=['csv', 'xlsx'])
+
+# --- 醒目的运费录入区 ---
+st.sidebar.markdown("""
+    <hr>
+    <h2 style='color: #FF4B4B; font-weight: bold;'>🚢 1. 当月头程运费录入 (CNY)</h2>
+    <p style='color: #FF4B4B; font-size: 13px;'>请输入本月分摊到此账号的总运费</p>
+""", unsafe_allow_html=True)
+manual_freight = st.sidebar.number_input("输入人民币金额", min_value=0.0, value=0.0, step=100.0, key="freight_input")
+
+# --- 财务参数 ---
+st.sidebar.markdown("<hr><h3>2. 财务参数设定</h3>", unsafe_allow_html=True)
+exchange_rate = st.sidebar.number_input("💵 结算汇率 (USD -> CNY)", min_value=1.0, value=7.00, step=0.01)
+recovery_rate = st.sidebar.number_input("♻️ 退货完好可售比例 (%)", min_value=0, max_value=100, value=50, step=1)
+
+# --- 后台逻辑部分 (保持 V9.9 智能识别逻辑) ---
+
+@st.cache_data 
+def process_data(file):
+    content = file.getvalue().decode('utf-8', errors='ignore')
+    lines = content.split('\n')
+    skip_n = 0
+    for i, line in enumerate(lines):
+        if 'settlement id' in line.lower() and 'type' in line.lower():
+            skip_n = i
+            break
+    file.seek(0)
+    df = pd.read_csv(file, skiprows=skip_n, sep=None, engine='python')
+    df.columns = df.columns.str.strip().str.lower()
+    if 'sku' in df.columns:
+        df['sku'] = df['sku'].astype(str).str.strip().str.upper()
+    if 'date/time' in df.columns:
+        df['date/time'] = df['date/time'].str.replace(' PDT', '').str.replace(' PST', '')
+        df['datetime'] = pd.to_datetime(df['date/time'], errors='coerce')
+        df['date'] = df['datetime'].dt.date
+    for col in ['total', 'product sales', 'selling fees', 'fba fees']:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
+    if 'description' in df.columns:
+        df['is_ad'] = df['description'].str.contains('Advertising', case=False, na=False)
+    else:
+        df['is_ad'] = False
+    return df
+
+@st.cache_data
+def process_cost(file):
+    if file.name.endswith('.csv'):
+        cost_df = pd.read_csv(file, encoding='utf-8-sig')
+    else:
+        xls = pd.ExcelFile(file)
+        sheet_names = xls.sheet_names
+        best_sheet = sheet_names[0]
+        if len(sheet_names) > 1:
+            for sheet in sheet_names:
+                temp_df = pd.read_excel(xls, sheet_name=sheet, nrows=3)
+                cols_str = "".join(temp_df.columns.astype(str))
+                if ('名' in cols_str or '产品' in cols_str) and ('成本' in cols_str or '价' in cols_str):
+                    best_sheet = sheet
+                    break
+        cost_df = pd.read_excel(xls, sheet_name=best_sheet)
+    
+    cost_df.columns = cost_df.columns.astype(str).str.replace('\r', ' ').str.replace('\n', ' ').str.strip()
+    cost_df.columns = cost_df.columns.str.replace(r'\s+', ' ', regex=True)
+    
+    col_name = '中文名'
+    for name in ['中文名', '产品名称', '品名']:
+        if name in cost_df.columns:
+            col_name = name
+            break
+            
+    col_inc = '销售成本'
+    for c_name in ['销售成本含税', '销售成本', '成本', '含税单价', '含税成本']:
+        if c_name in cost_df.columns:
+            col_inc = c_name
+            break
+            
+    col_exc = None
+    has_exc = False
+    for c_name in ['销售成本不含税', '不含税成本']:
+        if c_name in cost_df.columns:
+            col_exc = c_name
+            has_exc = True
+            break
+            
+    if col_name not in cost_df.columns: cost_df[col_name] = '未知产品'
+    if col_inc not in cost_df.columns: cost_df[col_inc] = 0.0
+        
+    id_vars_list = [col_name, col_inc]
+    if has_exc: id_vars_list.append(col_exc)
+        
+    exclude_cols = [col_name, col_inc, col_exc, '备注', '图片', '未命名', '序号', 'ID', 'NO', 'UNNAMED', '价', '重', '长', '宽', '高', '率', 'HS', '体积']
+    sku_cols = [c for c in cost_df.columns if c not in exclude_cols and 'UNNAMED' not in c.upper()]
+    
+    melted = cost_df.melt(id_vars=id_vars_list, value_vars=sku_cols, value_name='sku')
+    melted['sku'] = melted['sku'].astype(str).str.strip().str.upper() 
+    melted = melted[~melted['sku'].isin(['NAN', 'NONE', 'NULL', ''])]
+    melted[col_inc] = pd.to_numeric(melted[col_inc], errors='coerce').fillna(0.0)
+    if has_exc: melted[col_exc] = pd.to_numeric(melted[col_exc], errors='coerce').fillna(0.0)
+    return melted.drop_duplicates(subset=['sku'], keep='last'), col_name, col_inc, col_exc, has_exc
+
+# --- 主页面执行逻辑 ---
+if report_file and cost_file:
+    df_raw = process_data(report_file)
+    cost_df, col_name, col_inc, col_exc, has_exc = process_cost(cost_file)
+    rf = recovery_rate / 100.0
+    
+    min_date = df_raw['date'].min()
+    max_date = df_raw['date'].max()
+    st.sidebar.markdown("<hr>", unsafe_allow_html=True)
+    st.sidebar.header("3. 时间范围选择")
+    date_range = st.sidebar.date_input("筛选数据日期", [min_date, max_date], min_value=min_date, max_value=max_date)
+    
+    if len(date_range) == 2:
+        start_date, end_date = date_range
+        df = df_raw[(df_raw['date'] >= start_date) & (df_raw['date'] <= end_date)].copy()
+    else:
+        df = df_raw.copy()
+        
+    # 美元汇总
+    gross_sales_usd = df['product sales'].sum()
+    df_no_transfer = df[~df['type'].str.contains('Transfer', case=False, na=False)]
+    total_payout_usd = df_no_transfer['total'].sum()
+    ad_spend_usd = abs(df[df['is_ad']]['total'].sum())
+    ad_permille = (ad_spend_usd / gross_sales_usd * 1000) if gross_sales_usd > 0 else 0
+    transfer_total_usd = abs(df[df['type'].str.contains('Transfer', case=False, na=False)]['total'].sum())
+    
+    # 财务汇总
+    df_items = df[df['type'].str.contains('Order|Refund|Adjustment', case=False, na=False)].copy()
+    q_col = 'quantity' if 'quantity' in df_items.columns else 'amount-description'
+    df_items['qty_val'] = pd.to_numeric(df_items[q_col], errors='coerce').fillna(0).abs()
+    df_items['order_qty'] = df_items.apply(lambda x: x['qty_val'] if 'Order' in str(x['type']) else 0, axis=1)
+    df_items['refund_qty'] = df_items.apply(lambda x: x['qty_val'] if 'Refund' in str(x['type']) else 0, axis=1)
+    df_items['adj_qty'] = df_items.apply(lambda x: x['qty_val'] if 'Adjustment' in str(x['type']) else 0, axis=1)
+    
+    sku_stats = df_items.groupby('sku').agg({'order_qty':'sum', 'refund_qty':'sum', 'adj_qty':'sum', 'total':'sum'}).reset_index()
+    sku_merged = pd.merge(sku_stats, cost_df, on='sku', how='left')
+    sku_merged[col_name] = sku_merged[col_name].fillna('未知产品')
+    sku_merged[col_inc] = pd.to_numeric(sku_merged[col_inc], errors='coerce').fillna(0.0)
+    
+    cost_inc_total = ((sku_merged['order_qty'] + sku_merged['adj_qty']) * sku_merged[col_inc]).sum()
+    recovery_inc_total = (sku_merged['refund_qty'] * sku_merged[col_inc] * rf).sum()
+    profit_inc_total = (total_payout_usd * exchange_rate) - cost_inc_total + recovery_inc_total - manual_freight
+    
+    # --- 渲染展示 ---
+    st.markdown("### 💰 财务概览 (宏观汇总)")
+    
+    st.markdown("##### 💵 结算基础 (USD)")
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("总销售额 (USD)", f"${gross_sales_usd:,.2f}")
+    c2.metric("亚马逊净打款 (USD)", f"${total_payout_usd:,.2f}")
+    c3.markdown(f"<div style='padding-top: 0.2rem;'><p style='font-size: 14px; margin-bottom: 0px;'>广告花费 (USD)</p><div style='font-size: 1.8rem; font-weight: 600;'>${ad_spend_usd:,.2f} <span style='font-size: 0.5em; color: gray;'>({ad_permille:.1f}‰)</span></div></div>", unsafe_allow_html=True)
+    c4.metric("亚马逊转账金额 (USD)", f"${transfer_total_usd:,.2f}")
+    
+    st.markdown("##### 🇨🇳 核心核算基准 (CNY - 含税)")
+    c5, c6, c7, c8 = st.columns(4)
+    c5.metric("总销售额 (CNY)", f"¥{(gross_sales_usd * exchange_rate):,.2f}")
+    c6.metric("产品总成本", f"¥{cost_inc_total:,.2f}")
+    c7.metric("退货调整金额", f"¥{recovery_inc_total:,.2f}")
+    c8.metric("最终预估纯利", f"¥{profit_inc_total:,.2f}")
+    
+    if has_exc:
+        sku_merged[col_exc] = pd.to_numeric(sku_merged[col_exc], errors='coerce').fillna(0.0)
+        cost_exc_total = ((sku_merged['order_qty'] + sku_merged['adj_qty']) * sku_merged[col_exc]).sum()
+        recovery_exc_total = (sku_merged['refund_qty'] * sku_merged[col_exc] * rf).sum()
+        profit_exc_total = (total_payout_usd * exchange_rate) - cost_exc_total + recovery_exc_total - manual_freight
+        st.markdown("##### 🇨🇳 不含税核算基准 (CNY)")
+        c9, c10, c11, c12 = st.columns(4)
+        c9.metric("总销售额 (CNY)", f"¥{(gross_sales_usd * exchange_rate):,.2f}")
+        c10.metric("产品总成本 (不含税)", f"¥{cost_exc_total:,.2f}")
+        c11.metric("退货调整金额 (不含税)", f"¥{recovery_exc_total:,.2f}")
+        c12.metric("最终预估纯利 (不含税)", f"¥{profit_exc_total:,.2f}")
+
+    st.divider()
+    
+    # 图表
+    col_chart1, col_chart2 = st.columns(2)
+    with col_chart1:
+        daily_trend = df.groupby(['date', 'type'])['total'].sum().reset_index()
+        daily_trend = daily_trend[daily_trend['type'].isin(['Order', 'Refund'])]
+        st.plotly_chart(px.bar(daily_trend, x='date', y='total', color='type', title="每日净收入分布 (USD)", color_discrete_map={'Order':'#2ecc71','Refund':'#e74c3c'}), use_container_width=True)
+    with col_chart2:
+        fee_selling = abs(df['selling fees'].sum()) * exchange_rate
+        fee_fba = abs(df['fba fees'].sum()) * exchange_rate
+        fee_ad = ad_spend_usd * exchange_rate
+        st.plotly_chart(px.pie(names=['佣金','FBA费','广告','产品成本','头程运费','纯利'], values=[fee_selling, fee_fba, fee_ad, cost_inc_total, manual_freight, max(0, profit_inc_total)], title="费用结构去向 (CNY)", hole=0.4), use_container_width=True)
+
+    st.divider()
+    
+    # SKU 明细
+    st.markdown("### 📦 SKU 级别核心利润明细")
+    sku_merged['核心销售总成本'] = ((sku_merged['order_qty'] + sku_merged['adj_qty']) * sku_merged[col_inc]) - (sku_merged['refund_qty'] * sku_merged[col_inc] * rf)
+    sku_merged['单品核心纯利'] = (sku_merged['total'] * exchange_rate) - sku_merged['核心销售总成本']
+    sku_perf = sku_merged.sort_values('单品核心纯利', ascending=False)
+    sku_perf['quantity_net'] = sku_perf['order_qty'] - sku_perf['refund_qty']
+    view_df = sku_perf[['sku', col_name, 'quantity_net', 'refund_qty', 'adj_qty', 'total', col_inc, '核心销售总成本', '单品核心纯利']].copy()
+    view_df.columns = ['SKU','产品名称','净发货量','退货数','索赔(Adj)','净打款(USD)','基础成本','销售总成本','单品纯利']
+    st.dataframe(view_df.style.format({'净打款(USD)':'${:,.2f}','基础成本':'¥{:,.2f}','销售总成本':'¥{:,.2f}','单品纯利':'¥{:,.2f}'}), use_container_width=True, height=500)
+
+    # 榜单
+    st.divider()
+    sku_perf['full_label'] = sku_perf['sku'].astype(str) + " | " + sku_perf[col_name].astype(str)
+    st.markdown("#### 🏆 Top 20 利润榜单")
+    st.plotly_chart(px.bar(sku_perf.head(20), x='full_label', y='单品核心纯利', text='单品核心纯利', color='单品核心纯利', color_continuous_scale='Blues', height=600), use_container_width=True)
+    st.markdown("#### 🚨 Top 10 低利润/亏损预警")
+    st.plotly_chart(px.bar(sku_perf.sort_values('单品核心纯利').head(10), x='full_label', y='单品核心纯利', text='单品核心纯利', color='单品核心纯利', color_continuous_scale='Reds_r', height=600), use_container_width=True)
+
+    # 审计导出 (侧边栏)
+    with st.sidebar:
+        st.divider()
+        if st.button("🛡️ 生成并下载审计表"):
+            audit_df = df.copy()
+            audit_df['AE_单品核心成本'] = audit_df['sku'].map(cost_df.set_index('sku')[col_inc].to_dict()).fillna(0)
+            audit_df['AF_核心行利润'] = (audit_df['total'] * exchange_rate) - (audit_df['AE_单品核心成本'] * pd.to_numeric(audit_df['quantity'], errors='coerce').fillna(0).abs())
+            # 运费补差行
+            freight_row = {col: "" for col in audit_df.columns}
+            freight_row['type'], freight_row['sku'], freight_row['AF_核心行利润'] = "ADJUSTMENT", "MANUAL_FREIGHT", -manual_freight
+            audit_df = pd.concat([audit_df, pd.DataFrame([freight_row])], ignore_index=True)
+            out = BytesIO()
+            with pd.ExcelWriter(out, engine='openpyxl') as writer: audit_df.to_excel(writer, index=False)
+            st.download_button("💾 点击下载 Audit_Sheet.xlsx", out.getvalue(), "Audit_Sheet.xlsx")
+
+else:
+    st.info("👈 业财对账系统已就绪。请直接上传数据开始核算。")
