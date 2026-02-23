@@ -9,7 +9,7 @@ st.title("📈 亚马逊全链路利润与审计系统 (V10.0 终极实战版)")
 
 # --- 侧边栏：设置与上传 ---
 st.sidebar.header("数据源上传")
-report_file = st.sidebar.file_uploader("上传 Settlement 结算表 (CSV/TXT)", type=['csv', 'txt'])
+report_file = st.sidebar.file_uploader("上传 亚马逊销售表 (CSV/TXT)", type=['csv', 'txt'])
 cost_file = st.sidebar.file_uploader("上传 SKU 成本表 (Excel/CSV)", type=['csv', 'xlsx'])
 
 # --- 醒目的运费录入区 ---
@@ -268,3 +268,4 @@ if report_file and cost_file:
 
 else:
     st.info("👈 业财对账系统已就绪。请直接上传数据开始核算。")
+
