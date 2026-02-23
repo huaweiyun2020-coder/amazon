@@ -4,8 +4,8 @@ import plotly.express as px
 from io import BytesIO
 
 # --- 页面基础设置 ---
-st.set_page_config(page_title="亚马逊财务中台-V9.9", page_icon="📈", layout="wide")
-st.title("📈 亚马逊全链路利润与审计系统 (V9.9 极简公用版)")
+st.set_page_config(page_title="亚马逊财务中台-V10.0", page_icon="📈", layout="wide")
+st.title("📈 亚马逊全链路利润与审计系统 (V10.0 终极实战版)")
 
 # --- 侧边栏：设置与上传 ---
 st.sidebar.header("数据源上传")
@@ -25,8 +25,7 @@ st.sidebar.markdown("<hr><h3>2. 财务参数设定</h3>", unsafe_allow_html=True
 exchange_rate = st.sidebar.number_input("💵 结算汇率 (USD -> CNY)", min_value=1.0, value=7.00, step=0.01)
 recovery_rate = st.sidebar.number_input("♻️ 退货完好可售比例 (%)", min_value=0, max_value=100, value=50, step=1)
 
-# --- 后台逻辑部分 (保持 V9.9 智能识别逻辑) ---
-
+# --- 后台逻辑部分 ---
 @st.cache_data 
 def process_data(file):
     content = file.getvalue().decode('utf-8', errors='ignore')
@@ -144,7 +143,7 @@ if report_file and cost_file:
     df_items['refund_qty'] = df_items.apply(lambda x: x['qty_val'] if 'Refund' in str(x['type']) else 0, axis=1)
     df_items['adj_qty'] = df_items.apply(lambda x: x['qty_val'] if 'Adjustment' in str(x['type']) else 0, axis=1)
     
-    sku_stats = df_items.groupby('sku').agg({'order_qty':'sum', 'refund_qty':'sum', 'adj_qty':'sum', 'total':'sum'}).reset_index()
+    sku_stats = df_items.groupby('sku').agg({'order_qty':'sum', 'refund_qty':'sum', 'adj_qty':'sum', 'product sales':'sum', 'total':'sum'}).reset_index()
     sku_merged = pd.merge(sku_stats, cost_df, on='sku', how='left')
     sku_merged[col_name] = sku_merged[col_name].fillna('未知产品')
     sku_merged[col_inc] = pd.to_numeric(sku_merged[col_inc], errors='coerce').fillna(0.0)
@@ -198,32 +197,68 @@ if report_file and cost_file:
 
     st.divider()
     
-    # SKU 明细
-    st.markdown("### 📦 SKU 级别核心利润明细")
-    sku_merged['核心销售总成本'] = ((sku_merged['order_qty'] + sku_merged['adj_qty']) * sku_merged[col_inc]) - (sku_merged['refund_qty'] * sku_merged[col_inc] * rf)
-    sku_merged['单品核心纯利'] = (sku_merged['total'] * exchange_rate) - sku_merged['核心销售总成本']
-    sku_perf = sku_merged.sort_values('单品核心纯利', ascending=False)
-    sku_perf['quantity_net'] = sku_perf['order_qty'] - sku_perf['refund_qty']
-    view_df = sku_perf[['sku', col_name, 'quantity_net', 'refund_qty', 'adj_qty', 'total', col_inc, '核心销售总成本', '单品核心纯利']].copy()
-    view_df.columns = ['SKU','产品名称','净发货量','退货数','索赔(Adj)','净打款(USD)','基础成本','销售总成本','单品纯利']
-    st.dataframe(view_df.style.format({'净打款(USD)':'${:,.2f}','基础成本':'¥{:,.2f}','销售总成本':'¥{:,.2f}','单品纯利':'¥{:,.2f}'}), use_container_width=True, height=500)
+    # --- 💡 核心升级：SKU 级别核心利润明细（精简重构版） ---
+    st.markdown("### 📦 SKU 级别核心利润分析明细")
+    
+    # 计算新版指标
+    sku_merged['总销售额(USD)'] = sku_merged['product sales']
+    sku_merged['净销量'] = (sku_merged['order_qty'] - sku_merged['refund_qty']).astype(int)
+    sku_merged['退货数量'] = sku_merged['refund_qty'].astype(int)
+    
+    sku_merged['销售总成本'] = ((sku_merged['order_qty'] + sku_merged['adj_qty']) * sku_merged[col_inc]) - (sku_merged['refund_qty'] * sku_merged[col_inc] * rf)
+    sku_merged['产品利润-含税(CNY)'] = (sku_merged['total'] * exchange_rate) - sku_merged['销售总成本']
+    
+    # 安全计算利润率 (防报错处理)
+    def calc_margin(row):
+        sales_cny = row['总销售额(USD)'] * exchange_rate
+        if sales_cny > 0:
+            return row['产品利润-含税(CNY)'] / sales_cny
+        return 0.0
+    sku_merged['产品利润率'] = sku_merged.apply(calc_margin, axis=1)
+    
+    # 动态组装列名
+    cols_to_show = ['sku', col_name, '总销售额(USD)', '净销量', '退货数量', '销售总成本', '产品利润率', '产品利润-含税(CNY)']
+    new_col_names = ['SKU', '产品名称', '总销售额(USD)', '净销量', '退货数量', '销售总成本', '产品利润率', '产品利润-含税(CNY)']
+    
+    format_dict = {
+        '总销售额(USD)': '${:,.2f}',
+        '销售总成本': '¥{:,.2f}',
+        '产品利润-含税(CNY)': '¥{:,.2f}',
+        '产品利润率': '{:.1%}'
+    }
+    
+    if has_exc:
+        sku_merged['不含税销售总成本'] = ((sku_merged['order_qty'] + sku_merged['adj_qty']) * sku_merged[col_exc]) - (sku_merged['refund_qty'] * sku_merged[col_exc] * rf)
+        sku_merged['产品利润-不含税(CNY)'] = (sku_merged['total'] * exchange_rate) - sku_merged['不含税销售总成本']
+        cols_to_show.append('产品利润-不含税(CNY)')
+        new_col_names.append('产品利润-不含税(CNY)')
+        format_dict['产品利润-不含税(CNY)'] = '¥{:,.2f}'
 
-    # 榜单
+    # 默认按含税纯利从高到低排序
+    sku_perf = sku_merged.sort_values('产品利润-含税(CNY)', ascending=False)
+    view_df = sku_perf[cols_to_show].copy()
+    view_df.columns = new_col_names
+    
+    # 渲染全新表格
+    st.dataframe(view_df.style.format(format_dict), use_container_width=True, height=500)
+
+    # --- 🏆 榜单分析 ---
     st.divider()
     sku_perf['full_label'] = sku_perf['sku'].astype(str) + " | " + sku_perf[col_name].astype(str)
+    
     st.markdown("#### 🏆 Top 20 利润榜单")
-    st.plotly_chart(px.bar(sku_perf.head(20), x='full_label', y='单品核心纯利', text='单品核心纯利', color='单品核心纯利', color_continuous_scale='Blues', height=600), use_container_width=True)
+    st.plotly_chart(px.bar(sku_perf.head(20), x='full_label', y='产品利润-含税(CNY)', text='产品利润-含税(CNY)', color='产品利润-含税(CNY)', color_continuous_scale='Blues', height=600).update_traces(texttemplate='¥%{y:,.0f}', textposition='outside'), use_container_width=True)
+    
     st.markdown("#### 🚨 Top 10 低利润/亏损预警")
-    st.plotly_chart(px.bar(sku_perf.sort_values('单品核心纯利').head(10), x='full_label', y='单品核心纯利', text='单品核心纯利', color='单品核心纯利', color_continuous_scale='Reds_r', height=600), use_container_width=True)
+    st.plotly_chart(px.bar(sku_perf.sort_values('产品利润-含税(CNY)').head(10), x='full_label', y='产品利润-含税(CNY)', text='产品利润-含税(CNY)', color='产品利润-含税(CNY)', color_continuous_scale='Reds_r', height=600).update_traces(texttemplate='¥%{y:,.0f}', textposition='outside'), use_container_width=True)
 
-    # 审计导出 (侧边栏)
+    # --- 审计导出 ---
     with st.sidebar:
         st.divider()
         if st.button("🛡️ 生成并下载审计表"):
             audit_df = df.copy()
             audit_df['AE_单品核心成本'] = audit_df['sku'].map(cost_df.set_index('sku')[col_inc].to_dict()).fillna(0)
             audit_df['AF_核心行利润'] = (audit_df['total'] * exchange_rate) - (audit_df['AE_单品核心成本'] * pd.to_numeric(audit_df['quantity'], errors='coerce').fillna(0).abs())
-            # 运费补差行
             freight_row = {col: "" for col in audit_df.columns}
             freight_row['type'], freight_row['sku'], freight_row['AF_核心行利润'] = "ADJUSTMENT", "MANUAL_FREIGHT", -manual_freight
             audit_df = pd.concat([audit_df, pd.DataFrame([freight_row])], ignore_index=True)
