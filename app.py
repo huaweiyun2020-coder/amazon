@@ -4,8 +4,8 @@ import plotly.express as px
 from io import BytesIO
 
 # --- 页面基础设置 ---
-st.set_page_config(page_title="亚马逊财务中台-V10.1", page_icon="📈", layout="wide")
-st.title("📈 亚马逊全链路利润与审计系统 (V10.1 终极实战版)")
+st.set_page_config(page_title="亚马逊财务中台-V10.2", page_icon="📈", layout="wide")
+st.title("📈 亚马逊全链路利润与审计系统 (V10.2 终极实战版)")
 
 # --- 侧边栏：设置与上传 ---
 st.sidebar.header("数据源上传")
@@ -239,12 +239,17 @@ if report_file and cost_file:
     st.markdown("#### 🚨 Top 10 低利润/亏损预警")
     st.plotly_chart(px.bar(sku_perf.sort_values('产品利润-含税(CNY)').head(10), x='full_label', y='产品利润-含税(CNY)', text='产品利润-含税(CNY)', color='产品利润-含税(CNY)', color_continuous_scale='Reds_r', height=600).update_traces(texttemplate='¥%{y:,.0f}', textposition='outside'), use_container_width=True)
 
-    # --- 审计导出 (基于用户的精准容错逻辑重构) ---
+    # --- 审计导出 ---
     with st.sidebar:
         st.divider()
         st.header("4. 审计导出")
         if st.button("🛡️ 生成并核验审计表"):
             audit_df = raw_export_df.copy()
+            
+            # --- 【核心修改点：剔除中间生成的辅助列】 ---
+            cols_to_drop = ['datetime', 'date', 'is_ad']
+            audit_df = audit_df.drop(columns=[c for c in cols_to_drop if c in audit_df.columns], errors='ignore')
+            
             logic_cols = audit_df.columns.str.lower()
             
             type_idx = logic_cols.get_loc('type')
@@ -276,7 +281,7 @@ if report_file and cost_file:
             
             audit_df['AH_行利润'] = audit_df['AG_销售金额(CNY)'] - audit_df['AF_行总成本'] + audit_df['AI_退货返仓补偿']
             
-            # 【为了核验通过，隐形补上运费行】
+            # 【保留运费核对逻辑】
             freight_row = {col: "" for col in audit_df.columns}
             freight_row['type'], freight_row['sku'], freight_row['AH_行利润'] = "ADJUSTMENT", "MANUAL_FREIGHT", -manual_freight
             audit_df = pd.concat([audit_df, pd.DataFrame([freight_row])], ignore_index=True)
@@ -289,7 +294,7 @@ if report_file and cost_file:
                 out = BytesIO()
                 with pd.ExcelWriter(out, engine='openpyxl') as writer:
                     audit_df.to_excel(writer, index=False)
-                st.download_button("💾 下载严密审计表", out.getvalue(), "Audit_Sheet_V10.1.xlsx")
+                st.download_button("💾 下载严密审计表", out.getvalue(), "Audit_Sheet_V10.2.xlsx")
             else:
                 st.error(f"❌ **核验失败拦截！**\n请检查数据源异常！\n误差金额: ¥{diff:.2f}")
 
