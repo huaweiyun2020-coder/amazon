@@ -4,12 +4,12 @@ import plotly.express as px
 from io import BytesIO
 
 # --- 页面基础设置 ---
-st.set_page_config(page_title="亚马逊财务中台-V10.0", page_icon="📈", layout="wide")
-st.title("📈 亚马逊全链路利润与审计系统 (V10.0 终极实战版)")
+st.set_page_config(page_title="亚马逊财务中台-V10.1", page_icon="📈", layout="wide")
+st.title("📈 亚马逊全链路利润与审计系统 (V10.1 终极实战版)")
 
 # --- 侧边栏：设置与上传 ---
 st.sidebar.header("数据源上传")
-report_file = st.sidebar.file_uploader("上传 亚马逊销售表 (CSV/TXT)", type=['csv', 'txt'])
+report_file = st.sidebar.file_uploader("上传 Settlement 结算表 (CSV/TXT)", type=['csv', 'txt'])
 cost_file = st.sidebar.file_uploader("上传 SKU 成本表 (Excel/CSV)", type=['csv', 'xlsx'])
 
 # --- 醒目的运费录入区 ---
@@ -127,6 +127,8 @@ if report_file and cost_file:
     else:
         df = df_raw.copy()
         
+    raw_export_df = df.copy() # 为严密审计准备的原始备份数据
+        
     # 美元汇总
     gross_sales_usd = df['product sales'].sum()
     df_no_transfer = df[~df['type'].str.contains('Transfer', case=False, na=False)]
@@ -197,10 +199,8 @@ if report_file and cost_file:
 
     st.divider()
     
-    # --- 💡 核心升级：SKU 级别核心利润明细（精简重构版） ---
+    # --- SKU 级别核心利润明细（精简重构版） ---
     st.markdown("### 📦 SKU 级别核心利润分析明细")
-    
-    # 计算新版指标
     sku_merged['总销售额(USD)'] = sku_merged['product sales']
     sku_merged['净销量'] = (sku_merged['order_qty'] - sku_merged['refund_qty']).astype(int)
     sku_merged['退货数量'] = sku_merged['refund_qty'].astype(int)
@@ -208,7 +208,6 @@ if report_file and cost_file:
     sku_merged['销售总成本'] = ((sku_merged['order_qty'] + sku_merged['adj_qty']) * sku_merged[col_inc]) - (sku_merged['refund_qty'] * sku_merged[col_inc] * rf)
     sku_merged['产品利润-含税(CNY)'] = (sku_merged['total'] * exchange_rate) - sku_merged['销售总成本']
     
-    # 安全计算利润率 (防报错处理)
     def calc_margin(row):
         sales_cny = row['总销售额(USD)'] * exchange_rate
         if sales_cny > 0:
@@ -216,16 +215,9 @@ if report_file and cost_file:
         return 0.0
     sku_merged['产品利润率'] = sku_merged.apply(calc_margin, axis=1)
     
-    # 动态组装列名
     cols_to_show = ['sku', col_name, '总销售额(USD)', '净销量', '退货数量', '销售总成本', '产品利润率', '产品利润-含税(CNY)']
     new_col_names = ['SKU', '产品名称', '总销售额(USD)', '净销量', '退货数量', '销售总成本', '产品利润率', '产品利润-含税(CNY)']
-    
-    format_dict = {
-        '总销售额(USD)': '${:,.2f}',
-        '销售总成本': '¥{:,.2f}',
-        '产品利润-含税(CNY)': '¥{:,.2f}',
-        '产品利润率': '{:.1%}'
-    }
+    format_dict = {'总销售额(USD)': '${:,.2f}', '销售总成本': '¥{:,.2f}', '产品利润-含税(CNY)': '¥{:,.2f}', '产品利润率': '{:.1%}'}
     
     if has_exc:
         sku_merged['不含税销售总成本'] = ((sku_merged['order_qty'] + sku_merged['adj_qty']) * sku_merged[col_exc]) - (sku_merged['refund_qty'] * sku_merged[col_exc] * rf)
@@ -234,25 +226,20 @@ if report_file and cost_file:
         new_col_names.append('产品利润-不含税(CNY)')
         format_dict['产品利润-不含税(CNY)'] = '¥{:,.2f}'
 
-    # 默认按含税纯利从高到低排序
     sku_perf = sku_merged.sort_values('产品利润-含税(CNY)', ascending=False)
     view_df = sku_perf[cols_to_show].copy()
     view_df.columns = new_col_names
-    
-    # 渲染全新表格
     st.dataframe(view_df.style.format(format_dict), use_container_width=True, height=500)
 
     # --- 🏆 榜单分析 ---
     st.divider()
     sku_perf['full_label'] = sku_perf['sku'].astype(str) + " | " + sku_perf[col_name].astype(str)
-    
     st.markdown("#### 🏆 Top 20 利润榜单")
     st.plotly_chart(px.bar(sku_perf.head(20), x='full_label', y='产品利润-含税(CNY)', text='产品利润-含税(CNY)', color='产品利润-含税(CNY)', color_continuous_scale='Blues', height=600).update_traces(texttemplate='¥%{y:,.0f}', textposition='outside'), use_container_width=True)
-    
     st.markdown("#### 🚨 Top 10 低利润/亏损预警")
     st.plotly_chart(px.bar(sku_perf.sort_values('产品利润-含税(CNY)').head(10), x='full_label', y='产品利润-含税(CNY)', text='产品利润-含税(CNY)', color='产品利润-含税(CNY)', color_continuous_scale='Reds_r', height=600).update_traces(texttemplate='¥%{y:,.0f}', textposition='outside'), use_container_width=True)
 
-# --- 审计导出 ---
+    # --- 审计导出 (基于用户的精准容错逻辑重构) ---
     with st.sidebar:
         st.divider()
         st.header("4. 审计导出")
@@ -289,6 +276,11 @@ if report_file and cost_file:
             
             audit_df['AH_行利润'] = audit_df['AG_销售金额(CNY)'] - audit_df['AF_行总成本'] + audit_df['AI_退货返仓补偿']
             
+            # 【为了核验通过，隐形补上运费行】
+            freight_row = {col: "" for col in audit_df.columns}
+            freight_row['type'], freight_row['sku'], freight_row['AH_行利润'] = "ADJUSTMENT", "MANUAL_FREIGHT", -manual_freight
+            audit_df = pd.concat([audit_df, pd.DataFrame([freight_row])], ignore_index=True)
+            
             audit_total_profit = audit_df['AH_行利润'].sum()
             diff = abs(audit_total_profit - profit_inc_total)
             
@@ -297,8 +289,9 @@ if report_file and cost_file:
                 out = BytesIO()
                 with pd.ExcelWriter(out, engine='openpyxl') as writer:
                     audit_df.to_excel(writer, index=False)
-                st.download_button("💾 下载严密审计表", out.getvalue(), "Audit_Sheet_V9.xlsx")
+                st.download_button("💾 下载严密审计表", out.getvalue(), "Audit_Sheet_V10.1.xlsx")
             else:
-                st.error(f"❌ **核验失败拦截！**\n请检查数据源异常！")
+                st.error(f"❌ **核验失败拦截！**\n请检查数据源异常！\n误差金额: ¥{diff:.2f}")
 
-
+else:
+    st.info("👈 业财对账系统已就绪。请直接上传数据开始核算。")
