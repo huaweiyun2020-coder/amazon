@@ -252,20 +252,53 @@ if report_file and cost_file:
     st.markdown("#### 🚨 Top 10 低利润/亏损预警")
     st.plotly_chart(px.bar(sku_perf.sort_values('产品利润-含税(CNY)').head(10), x='full_label', y='产品利润-含税(CNY)', text='产品利润-含税(CNY)', color='产品利润-含税(CNY)', color_continuous_scale='Reds_r', height=600).update_traces(texttemplate='¥%{y:,.0f}', textposition='outside'), use_container_width=True)
 
-    # --- 审计导出 ---
+# --- 审计导出 ---
     with st.sidebar:
         st.divider()
-        if st.button("🛡️ 生成并下载审计表"):
-            audit_df = df.copy()
-            audit_df['AE_单品核心成本'] = audit_df['sku'].map(cost_df.set_index('sku')[col_inc].to_dict()).fillna(0)
-            audit_df['AF_核心行利润'] = (audit_df['total'] * exchange_rate) - (audit_df['AE_单品核心成本'] * pd.to_numeric(audit_df['quantity'], errors='coerce').fillna(0).abs())
-            freight_row = {col: "" for col in audit_df.columns}
-            freight_row['type'], freight_row['sku'], freight_row['AF_核心行利润'] = "ADJUSTMENT", "MANUAL_FREIGHT", -manual_freight
-            audit_df = pd.concat([audit_df, pd.DataFrame([freight_row])], ignore_index=True)
-            out = BytesIO()
-            with pd.ExcelWriter(out, engine='openpyxl') as writer: audit_df.to_excel(writer, index=False)
-            st.download_button("💾 点击下载 Audit_Sheet.xlsx", out.getvalue(), "Audit_Sheet.xlsx")
+        st.header("4. 审计导出")
+        if st.button("🛡️ 生成并核验审计表"):
+            audit_df = raw_export_df.copy()
+            logic_cols = audit_df.columns.str.lower()
+            
+            type_idx = logic_cols.get_loc('type')
+            sku_idx = logic_cols.get_loc('sku') if 'sku' in logic_cols else -1
+            qty_idx = logic_cols.get_loc('quantity') if 'quantity' in logic_cols else logic_cols.get_loc('amount-description')
+            total_idx = logic_cols.get_loc('total') if 'total' in logic_cols else -1
+            
+            temp_type = audit_df.iloc[:, type_idx].astype(str).fillna('')
+            temp_sku = audit_df.iloc[:, sku_idx].astype(str).str.upper() if sku_idx != -1 else pd.Series([''] * len(audit_df))
+            temp_qty = pd.to_numeric(audit_df.iloc[:, qty_idx], errors='coerce').fillna(0).abs()
+            temp_total = pd.to_numeric(audit_df.iloc[:, total_idx].astype(str).str.replace(',',''), errors='coerce').fillna(0)
+            
+            cost_map = cost_df.set_index('sku')[col_inc].to_dict()
+            # 审计表列名动态调整
+            audit_cost_name = f'AE_单个成本({col_inc})'
+            audit_df[audit_cost_name] = temp_sku.map(cost_map).fillna(0)
+            
+            is_cost_deducted = temp_type.str.contains('Order|Adjustment', case=False, regex=True)
+            audit_df['AF_行总成本'] = 0.0
+            audit_df.loc[is_cost_deducted, 'AF_行总成本'] = audit_df.loc[is_cost_deducted, audit_cost_name] * temp_qty[is_cost_deducted]
+            
+            is_transfer = temp_type.str.contains('Transfer', case=False)
+            audit_df['AG_销售金额(CNY)'] = temp_total * exchange_rate
+            audit_df.loc[is_transfer, 'AG_销售金额(CNY)'] = 0.0
+            
+            is_refund = temp_type.str.contains('Refund', case=False)
+            audit_df['AI_退货返仓补偿'] = 0.0
+            audit_df.loc[is_refund, 'AI_退货返仓补偿'] = audit_df.loc[is_refund, audit_cost_name] * temp_qty[is_refund] * rf
+            
+            audit_df['AH_行利润'] = audit_df['AG_销售金额(CNY)'] - audit_df['AF_行总成本'] + audit_df['AI_退货返仓补偿']
+            
+            audit_total_profit = audit_df['AH_行利润'].sum()
+            diff = abs(audit_total_profit - profit_inc_total)
+            
+            if diff <= 0.05:
+                st.success(f"✅ **查验通过！**\n逻辑完美匹配。")
+                out = BytesIO()
+                with pd.ExcelWriter(out, engine='openpyxl') as writer:
+                    audit_df.to_excel(writer, index=False)
+                st.download_button("💾 下载严密审计表", out.getvalue(), "Audit_Sheet_V9.xlsx")
+            else:
+                st.error(f"❌ **核验失败拦截！**\n请检查数据源异常！")
 
-else:
-    st.info("👈 业财对账系统已就绪。请直接上传数据开始核算。")
 
